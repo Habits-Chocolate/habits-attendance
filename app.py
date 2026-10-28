@@ -53,15 +53,18 @@ try:
     sched_res = supabase.table("shift_schedules").select("*").execute()
     sched_df = pd.DataFrame(sched_res.data)
     if not sched_df.empty:
-        SHIFT_STARTS = dict(zip(sched_df['employee_name'], sched_df['start_hour']))
+        # Failsafe just in case columns aren't created yet
+        if 'end_hour' not in sched_df.columns: sched_df['end_hour'] = 17
+        if 'day_off' not in sched_df.columns: sched_df['day_off'] = 'None'
+        SHIFT_CONFIGS = sched_df.set_index('employee_name').to_dict('index')
     else:
-        SHIFT_STARTS = {}
+        SHIFT_CONFIGS = {}
 except:
-    SHIFT_STARTS = {}
+    SHIFT_CONFIGS = {}
 
 # --- 4. FETCH & PROCESS DATA ---
 @st.cache_data(ttl=600)
-def load_data(_shift_starts_dict):
+def load_data(_shift_configs):
     response = supabase.table("attendance_logs").select("*").execute()
     if not response.data:
         return pd.DataFrame()
@@ -69,33 +72,60 @@ def load_data(_shift_starts_dict):
     df = pd.DataFrame(response.data)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['Date'] = df['timestamp'].dt.date
-    df['Month'] = df['timestamp'].dt.strftime('%B %Y')
     
     if 'Employee Name' not in df.columns:
         df['Employee Name'] = df.get('name', df['employee_id'])
         
-    daily_summary = df.groupby(['employee_id', 'Employee Name', 'Date', 'Month']).agg(
+    # Group existing punches
+    punches_summary = df.groupby(['employee_id', 'Employee Name', 'Date']).agg(
         Check_In=('timestamp', 'min'),
         Check_Out=('timestamp', 'max')
     ).reset_index()
 
+    # GENERATE FULL CALENDAR (Ensures Absences and Days Off are tracked accurately)
+    min_date = punches_summary['Date'].min()
+    max_date = punches_summary['Date'].max()
+    all_dates = pd.date_range(start=min_date, end=max_date).date
+    
+    unique_emps = punches_summary[['employee_id', 'Employee Name']].drop_duplicates()
+    grid = unique_emps.assign(key=1).merge(pd.DataFrame({'Date': all_dates, 'key': 1}), on='key').drop('key', axis=1)
+    
+    # Merge real punches into the full calendar grid
+    daily_summary = pd.merge(grid, punches_summary, on=['employee_id', 'Employee Name', 'Date'], how='left')
+    daily_summary['Month'] = pd.to_datetime(daily_summary['Date']).dt.strftime('%B %Y')
+
     def determine_status(row):
+        emp_name = row['Employee Name']
+        day_name = row['Date'].strftime('%A')
+        
+        # Pull customized employee settings
+        config = _shift_configs.get(emp_name, {})
+        start_hr = config.get('start_hour', 8)
+        end_hr = config.get('end_hour', 17)
+        day_off = config.get('day_off', 'None')
+        
+        # Handled Days with no punches
         if pd.isna(row['Check_In']) and pd.isna(row['Check_Out']):
-            return "Absent", 0.0, "-", "-"
+            if day_name == day_off:
+                return "Day Off", 0.0, "-", "-"
+            else:
+                return "Absent", 0.0, "-", "-"
             
+        # Handled Days with only 1 punch
         if row['Check_In'] == row['Check_Out']:
             time_str = row['Check_In'].strftime('%H:%M')
             punch_hour = row['Check_In'].hour
-            emp_name = row['Employee Name']
             
-            # System uses saved start time, defaults to 8 AM if newly added and unsaved
-            scheduled_start = _shift_starts_dict.get(emp_name, 8)
+            # Smart Missing Punch Logic: compares distance to start vs end shift
+            start_diff = abs(punch_hour - start_hr)
+            end_diff = abs(punch_hour - end_hr)
             
-            if punch_hour < (scheduled_start + 4): 
+            if start_diff <= end_diff: 
                 return "Incomplete (No Out)", 0.0, time_str, "MISSING OUT"
             else:
                 return "Incomplete (No In)", 0.0, "MISSING IN", time_str
         
+        # Complete Shifts
         hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600
         in_str = row['Check_In'].strftime('%H:%M')
         out_str = row['Check_Out'].strftime('%H:%M')
@@ -104,37 +134,46 @@ def load_data(_shift_starts_dict):
     status_data = daily_summary.apply(determine_status, axis=1, result_type='expand')
     daily_summary[['Status', 'Hours', 'Check In', 'Check Out']] = status_data
     daily_summary.rename(columns={'employee_id': 'ID'}, inplace=True)
+    
     return daily_summary
 
-df = load_data(SHIFT_STARTS)
+df = load_data(SHIFT_CONFIGS)
 
 # --- 5. TABS FOR DASHBOARD & SETTINGS ---
 tab1, tab2 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings"])
 
 with tab2:
     st.markdown("### Manage Staff Shift Schedules")
-    st.write("This list automatically populates with all staff registered on the ZKTeco machine. Set their standard start time (in 24-hour format).")
+    st.write("Set start times, end times (24-hour format), and designated Days Off. Unscheduled days with no punches will be tracked as Absences.")
     
     if not df.empty:
-        # Automatically generate the full list of unique staff from the database
-        unique_staff = df['Employee Name'].unique()
+        unique_staff = df['Employee Name'].dropna().unique()
         staff_schedules = []
-        
         for staff in unique_staff:
-            start_time = SHIFT_STARTS.get(staff, 8) # Pulls their saved time, or gives them 8 AM
-            staff_schedules.append({"employee_name": staff, "start_hour": start_time})
-            
+            conf = SHIFT_CONFIGS.get(staff, {})
+            staff_schedules.append({
+                "employee_name": staff, 
+                "start_hour": conf.get('start_hour', 8),
+                "end_hour": conf.get('end_hour', 17),
+                "day_off": conf.get('day_off', 'None')
+            })
         ui_sched_df = pd.DataFrame(staff_schedules)
     else:
-        ui_sched_df = pd.DataFrame(columns=["employee_name", "start_hour"])
+        ui_sched_df = pd.DataFrame(columns=["employee_name", "start_hour", "end_hour", "day_off"])
         
     edited_schedules = st.data_editor(
         ui_sched_df, 
         use_container_width=True,
         hide_index=True,
         column_config={
-            "employee_name": st.column_config.TextColumn("Employee Name", disabled=True), # Locks the name so it can't be broken
-            "start_hour": st.column_config.NumberColumn("Start Hour (0-23)", min_value=0, max_value=23, required=True)
+            "employee_name": st.column_config.TextColumn("Employee Name", disabled=True),
+            "start_hour": st.column_config.NumberColumn("Start Hour (0-23)", min_value=0, max_value=23, required=True),
+            "end_hour": st.column_config.NumberColumn("End Hour (0-23)", min_value=0, max_value=23, required=True),
+            "day_off": st.column_config.SelectboxColumn(
+                "Day Off",
+                options=["None", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+                required=True
+            )
         }
     )
     
@@ -142,7 +181,7 @@ with tab2:
         records_to_save = edited_schedules.to_dict(orient="records")
         if records_to_save:
             supabase.table("shift_schedules").upsert(records_to_save).execute()
-        st.success("Schedules updated successfully! The system will now use these times to calculate punches.")
+        st.success("Schedules updated! The attendance dashboard is recalculating punches and absences based on your new rules.")
         load_data.clear()
         st.rerun()
 
@@ -209,14 +248,18 @@ with tab1:
             )
         
         display_df = filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].copy()
+        
+        # Formatting for the table presentation
         display_df['Date'] = pd.to_datetime(display_df['Date']).dt.strftime('%d/%m/%Y')
-        display_df['Hours'] = display_df['Hours'].map('{:.2f}'.format)
+        display_df['Hours'] = display_df['Hours'].map(lambda x: f"{float(x):.2f}")
 
         def highlight_status(row):
             if row['Status'] == 'Absent':
                 return ['background-color: #FFEAEE; color: #D32F2F'] * len(row)
             elif 'Incomplete' in row['Status']:
                 return ['background-color: #FFF4E5; color: #ED6C02'] * len(row)
+            elif row['Status'] == 'Day Off':
+                return ['background-color: #F3F4F6; color: #6B7280'] * len(row) # Grey for day off
             else:
                 return [''] * len(row)
 
