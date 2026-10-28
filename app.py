@@ -62,7 +62,7 @@ except:
 # --- 4. FETCH & PROCESS DATA ---
 @st.cache_data(ttl=600)
 def load_data(_weekly_configs):
-    response = supabase.table("attendance_logs").select("*").execute()
+    response = supabase.table("attendance_logs").select("*").limit(10000).execute()
     if not response.data:
         return pd.DataFrame()
         
@@ -93,7 +93,6 @@ def load_data(_weekly_configs):
         emp_name = row['Employee Name']
         day_name = row['Date'].strftime('%A')
         
-        # Look up the employee's config, pull the specific day's rules
         emp_config = _weekly_configs.get(emp_name, {})
         day_config = emp_config.get(day_name, {"start": 8, "end": 17, "off": False})
         
@@ -101,14 +100,12 @@ def load_data(_weekly_configs):
         end_hr = day_config["end"]
         is_off = day_config["off"]
         
-        # No punches
         if pd.isna(row['Check_In']) and pd.isna(row['Check_Out']):
             if is_off:
                 return "Day Off", 0.0, "-", "-"
             else:
                 return "Absent", 0.0, "-", "-"
             
-        # One punch
         if row['Check_In'] == row['Check_Out']:
             time_str = row['Check_In'].strftime('%H:%M')
             punch_hour = row['Check_In'].hour
@@ -121,7 +118,6 @@ def load_data(_weekly_configs):
             else:
                 return "Incomplete (No In)", 0.0, "MISSING IN", time_str
         
-        # Complete Shifts
         hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600
         in_str = row['Check_In'].strftime('%H:%M')
         out_str = row['Check_Out'].strftime('%H:%M')
@@ -148,7 +144,6 @@ with tab2:
         selected_emp = st.selectbox("Select Staff Member to Edit", unique_staff)
         st.markdown(f"#### Editing Schedule for: **{selected_emp}**")
         
-        # Load this employee's weekly config
         emp_config = WEEKLY_CONFIGS.get(selected_emp, {})
         days_of_week = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
         
@@ -175,7 +170,6 @@ with tab2:
         )
         
         if st.button(f"💾 Save Weekly Schedule for {selected_emp}"):
-            # Convert UI table back into JSON format
             new_schedule = {}
             for _, row in edited_week.iterrows():
                 new_schedule[row["Day"]] = {
@@ -184,7 +178,6 @@ with tab2:
                     "off": bool(row["Day Off?"])
                 }
             
-            # Upsert directly to Supabase
             supabase.table("weekly_schedules").upsert({
                 "employee_name": selected_emp,
                 "schedule_data": new_schedule
@@ -244,9 +237,50 @@ with tab1:
         with col_title:
             st.markdown("##### DAILY SHIFT TRACKER (ABSENCES & ERRORS)")
         with col_btn:
+            # Excel Export logic with styling
             buffer = io.BytesIO()
+            export_df = filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].copy()
+            export_df['Date'] = pd.to_datetime(export_df['Date']).dt.strftime('%d/%m/%Y')
+            export_df['Hours'] = export_df['Hours'].map(lambda x: float(x))
+            
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].to_excel(writer, index=False, sheet_name='Attendance')
+                export_df.to_excel(writer, index=False, sheet_name='Attendance')
+                workbook  = writer.book
+                worksheet = writer.sheets['Attendance']
+                
+                # Define Professional Formats
+                header_format = workbook.add_format({'bold': True, 'bg_color': '#5C3A21', 'font_color': 'white', 'border': 1})
+                format_complete = workbook.add_format({'bg_color': '#FFFFFF', 'border': 1})
+                format_absent = workbook.add_format({'bg_color': '#FFEAEE', 'font_color': '#D32F2F', 'border': 1})
+                format_incomplete = workbook.add_format({'bg_color': '#FFF4E5', 'font_color': '#ED6C02', 'border': 1})
+                format_dayoff = workbook.add_format({'bg_color': '#F3F4F6', 'font_color': '#6B7280', 'border': 1})
+                
+                # Apply Header Styles and Column Widths
+                for col_num, value in enumerate(export_df.columns.values):
+                    worksheet.write(0, col_num, value, header_format)
+                
+                worksheet.set_column('A:A', 8)  # ID
+                worksheet.set_column('B:B', 20) # Employee Name
+                worksheet.set_column('C:C', 15) # Date
+                worksheet.set_column('D:E', 12) # Check In / Check Out
+                worksheet.set_column('F:F', 10) # Hours
+                worksheet.set_column('G:G', 25) # Status
+                
+                # Apply Color Coding per Row
+                for row_num in range(len(export_df)):
+                    status = export_df.iloc[row_num]['Status']
+                    if status == 'Absent':
+                        row_format = format_absent
+                    elif 'Incomplete' in status:
+                        row_format = format_incomplete
+                    elif status == 'Day Off':
+                        row_format = format_dayoff
+                    else:
+                        row_format = format_complete
+                        
+                    for col_num in range(len(export_df.columns)):
+                        val = export_df.iloc[row_num, col_num]
+                        worksheet.write(row_num + 1, col_num, val, row_format)
             
             st.download_button(
                 label="📥 Export to Excel",
