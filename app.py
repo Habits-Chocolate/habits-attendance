@@ -3,7 +3,17 @@ import pandas as pd
 from supabase import create_client
 import io
 
-# --- 1. PAGE CONFIG & CHOCOLATE THEME ---
+# --- 1. SHIFT SCHEDULES CONFIGURATION ---
+# Define expected start hours (24-hour format) for employees with late shifts.
+# Anyone not listed here will automatically default to an 8 (8:00 AM) start time.
+# You can add or edit names here anytime your staff schedules change.
+SHIFT_STARTS = {
+    "Ismail": 12,    # Starts at 12:00 PM
+    "Dhiraj": 14,    # Starts at 2:00 PM
+    # "Example Name": 15,  # Would start at 3:00 PM
+}
+
+# --- 2. PAGE CONFIG & CHOCOLATE THEME ---
 st.set_page_config(page_title="HABITS Attendance", layout="wide")
 
 st.markdown("""
@@ -59,14 +69,14 @@ st.markdown("""
 # Custom Title 
 st.markdown("<h1 style='color: #5C3A21;'><b>HABITS</b> <span style='color: #A99B8E; font-size: 28px;'>Attendance & Time Tracking</span></h1>", unsafe_allow_html=True)
 
-# --- 2. SUPABASE CONNECTION ---
+# --- 3. SUPABASE CONNECTION ---
 @st.cache_resource
 def init_connection():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 supabase = init_connection()
 
-# --- 3. FETCH & PROCESS DATA ---
+# --- 4. FETCH & PROCESS DATA ---
 @st.cache_data(ttl=600)
 def load_data():
     response = supabase.table("attendance_logs").select("*").execute()
@@ -89,13 +99,23 @@ def load_data():
     def determine_status(row):
         if pd.isna(row['Check_In']) and pd.isna(row['Check_Out']):
             return "Absent", 0.0, "-", "-"
+            
+        # SCHEDULE-BASED SINGLE PUNCH LOGIC
         if row['Check_In'] == row['Check_Out']:
             time_str = row['Check_In'].strftime('%H:%M')
-            if row['Check_In'].hour >= 12: 
-                return "Incomplete (No In)", 0.0, "MISSING IN", time_str
-            else:
+            punch_hour = row['Check_In'].hour
+            emp_name = row['Employee Name']
+            
+            # Get the employee's scheduled start time (defaults to 8 AM)
+            scheduled_start = SHIFT_STARTS.get(emp_name, 8)
+            
+            # If punch is before or within 4 hours of their scheduled start, it's a Check-In
+            if punch_hour < (scheduled_start + 4): 
                 return "Incomplete (No Out)", 0.0, time_str, "MISSING OUT"
+            else:
+                return "Incomplete (No In)", 0.0, "MISSING IN", time_str
         
+        # Calculate normal complete shifts
         hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600
         in_str = row['Check_In'].strftime('%H:%M')
         out_str = row['Check_Out'].strftime('%H:%M')
@@ -114,7 +134,7 @@ if df.empty:
     st.info("No records found.")
     st.stop()
 
-# --- 4. FILTERS ---
+# --- 5. FILTERS ---
 st.markdown("### DATA EXTRACTION & FILTERS")
 col1, col2, col3 = st.columns(3)
 
@@ -139,7 +159,7 @@ if selected_employee:
 if selected_date:
     filtered_df = filtered_df[filtered_df['Date'] == selected_date]
 
-# --- 5. SUMMARY METRICS ---
+# --- 6. SUMMARY METRICS ---
 st.markdown("### SUMMARY STATISTICS")
 m1, m2, m3, m4 = st.columns(4)
 
@@ -150,7 +170,7 @@ m4.metric("Missing Punches", len(filtered_df[filtered_df['Status'].str.contains(
 
 st.divider()
 
-# --- 6. DATAFRAME & HIGHLIGHTING ---
+# --- 7. DATAFRAME & HIGHLIGHTING ---
 col_table1, col_table2 = st.columns([1, 3])
 
 with col_table1:
