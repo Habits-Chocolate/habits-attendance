@@ -58,7 +58,6 @@ try:
         SHIFT_STARTS = {}
 except:
     SHIFT_STARTS = {}
-    sched_df = pd.DataFrame(columns=["employee_name", "start_hour"])
 
 # --- 4. FETCH & PROCESS DATA ---
 @st.cache_data(ttl=600)
@@ -89,7 +88,7 @@ def load_data(_shift_starts_dict):
             punch_hour = row['Check_In'].hour
             emp_name = row['Employee Name']
             
-            # Checks the UI settings, defaults to 8 AM if not listed
+            # System uses saved start time, defaults to 8 AM if newly added and unsaved
             scheduled_start = _shift_starts_dict.get(emp_name, 8)
             
             if punch_hour < (scheduled_start + 4): 
@@ -114,35 +113,42 @@ tab1, tab2 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings"])
 
 with tab2:
     st.markdown("### Manage Staff Shift Schedules")
-    st.write("Use this table to set custom start times for staff members (use 24-hour format, e.g., 14 for 2:00 PM). **Anyone not listed here will automatically default to an 8:00 AM start.**")
+    st.write("This list automatically populates with all staff registered on the ZKTeco machine. Set their standard start time (in 24-hour format).")
     
-    # Interactive UI for editing schedules
-    if sched_df.empty:
-        sched_df = pd.DataFrame([{"employee_name": "", "start_hour": 12}])
+    if not df.empty:
+        # Automatically generate the full list of unique staff from the database
+        unique_staff = df['Employee Name'].unique()
+        staff_schedules = []
+        
+        for staff in unique_staff:
+            start_time = SHIFT_STARTS.get(staff, 8) # Pulls their saved time, or gives them 8 AM
+            staff_schedules.append({"employee_name": staff, "start_hour": start_time})
+            
+        ui_sched_df = pd.DataFrame(staff_schedules)
+    else:
+        ui_sched_df = pd.DataFrame(columns=["employee_name", "start_hour"])
         
     edited_schedules = st.data_editor(
-        sched_df, 
-        num_rows="dynamic", 
+        ui_sched_df, 
         use_container_width=True,
+        hide_index=True,
         column_config={
-            "employee_name": st.column_config.TextColumn("Employee Name", required=True),
+            "employee_name": st.column_config.TextColumn("Employee Name", disabled=True), # Locks the name so it can't be broken
             "start_hour": st.column_config.NumberColumn("Start Hour (0-23)", min_value=0, max_value=23, required=True)
         }
     )
     
     if st.button("💾 Save Schedules to System"):
-        # Convert the UI table to data Supabase can read
-        records_to_save = edited_schedules.dropna(subset=["employee_name"]).to_dict(orient="records")
+        records_to_save = edited_schedules.to_dict(orient="records")
         if records_to_save:
             supabase.table("shift_schedules").upsert(records_to_save).execute()
         st.success("Schedules updated successfully! The system will now use these times to calculate punches.")
-        # Clears cache so the dashboard immediately updates with new logic
         load_data.clear()
         st.rerun()
 
 with tab1:
     if df.empty:
-        st.info("No records found.")
+        st.info("No attendance records found.")
         st.stop()
 
     st.markdown("### DATA EXTRACTION & FILTERS")
