@@ -17,25 +17,39 @@ st.markdown("""
     }
     
     /* Professional Pill-Shaped Metric Cards */
-    div[data-testid="metric-container"] {
-        background-color: #FFFFFF;
-        border: 1px solid #EADDCD;
-        padding: 15px 30px;
+    div[data-testid="stMetric"] {
+        background-color: #FFFFFF !important;
+        border: 1px solid #EADDCD !important;
+        padding: 15px 30px !important;
         border-radius: 50px !important;
-        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.04);
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        transition: all 0.3s ease;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.04) !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        transition: all 0.3s ease !important;
     }
     
-    div[data-testid="metric-container"]:hover {
-        transform: translateY(-4px);
-        box-shadow: 0 8px 16px rgba(92, 58, 33, 0.12);
-        border-color: #A99B8E;
+    /* Smooth hover effect with a subtle brown shadow */
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-4px) !important;
+        box-shadow: 0 8px 16px rgba(92, 58, 33, 0.12) !important;
+        border-color: #A99B8E !important;
     }
     
+    /* Center the label text */
+    div[data-testid="stMetricLabel"] {
+        display: flex !important;
+        justify-content: center !important;
+        width: 100% !important;
+    }
+    
+    /* Center and enforce espresso color on the giant metric numbers */
+    div[data-testid="stMetricValue"] {
+        display: flex !important;
+        justify-content: center !important;
+        width: 100% !important;
+    }
     div[data-testid="stMetricValue"] > div {
         color: #5C3A21 !important;
     }
