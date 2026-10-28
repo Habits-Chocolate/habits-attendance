@@ -48,23 +48,20 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- 3. LOAD DYNAMIC SHIFT SCHEDULES FROM SUPABASE ---
+# --- 3. LOAD WEEKLY SCHEDULES FROM SUPABASE ---
 try:
-    sched_res = supabase.table("shift_schedules").select("*").execute()
+    sched_res = supabase.table("weekly_schedules").select("*").execute()
     sched_df = pd.DataFrame(sched_res.data)
     if not sched_df.empty:
-        # Failsafe just in case columns aren't created yet
-        if 'end_hour' not in sched_df.columns: sched_df['end_hour'] = 17
-        if 'day_off' not in sched_df.columns: sched_df['day_off'] = 'None'
-        SHIFT_CONFIGS = sched_df.set_index('employee_name').to_dict('index')
+        WEEKLY_CONFIGS = sched_df.set_index('employee_name')['schedule_data'].to_dict()
     else:
-        SHIFT_CONFIGS = {}
+        WEEKLY_CONFIGS = {}
 except:
-    SHIFT_CONFIGS = {}
+    WEEKLY_CONFIGS = {}
 
 # --- 4. FETCH & PROCESS DATA ---
 @st.cache_data(ttl=600)
-def load_data(_shift_configs):
+def load_data(_weekly_configs):
     response = supabase.table("attendance_logs").select("*").execute()
     if not response.data:
         return pd.DataFrame()
@@ -76,13 +73,12 @@ def load_data(_shift_configs):
     if 'Employee Name' not in df.columns:
         df['Employee Name'] = df.get('name', df['employee_id'])
         
-    # Group existing punches
     punches_summary = df.groupby(['employee_id', 'Employee Name', 'Date']).agg(
         Check_In=('timestamp', 'min'),
         Check_Out=('timestamp', 'max')
     ).reset_index()
 
-    # GENERATE FULL CALENDAR (Ensures Absences and Days Off are tracked accurately)
+    # GENERATE FULL CALENDAR 
     min_date = punches_summary['Date'].min()
     max_date = punches_summary['Date'].max()
     all_dates = pd.date_range(start=min_date, end=max_date).date
@@ -90,7 +86,6 @@ def load_data(_shift_configs):
     unique_emps = punches_summary[['employee_id', 'Employee Name']].drop_duplicates()
     grid = unique_emps.assign(key=1).merge(pd.DataFrame({'Date': all_dates, 'key': 1}), on='key').drop('key', axis=1)
     
-    # Merge real punches into the full calendar grid
     daily_summary = pd.merge(grid, punches_summary, on=['employee_id', 'Employee Name', 'Date'], how='left')
     daily_summary['Month'] = pd.to_datetime(daily_summary['Date']).dt.strftime('%B %Y')
 
@@ -98,25 +93,26 @@ def load_data(_shift_configs):
         emp_name = row['Employee Name']
         day_name = row['Date'].strftime('%A')
         
-        # Pull customized employee settings
-        config = _shift_configs.get(emp_name, {})
-        start_hr = config.get('start_hour', 8)
-        end_hr = config.get('end_hour', 17)
-        day_off = config.get('day_off', 'None')
+        # Look up the employee's config, pull the specific day's rules
+        emp_config = _weekly_configs.get(emp_name, {})
+        day_config = emp_config.get(day_name, {"start": 8, "end": 17, "off": False})
         
-        # Handled Days with no punches
+        start_hr = day_config["start"]
+        end_hr = day_config["end"]
+        is_off = day_config["off"]
+        
+        # No punches
         if pd.isna(row['Check_In']) and pd.isna(row['Check_Out']):
-            if day_name == day_off:
+            if is_off:
                 return "Day Off", 0.0, "-", "-"
             else:
                 return "Absent", 0.0, "-", "-"
             
-        # Handled Days with only 1 punch
+        # One punch
         if row['Check_In'] == row['Check_Out']:
             time_str = row['Check_In'].strftime('%H:%M')
             punch_hour = row['Check_In'].hour
             
-            # Smart Missing Punch Logic: compares distance to start vs end shift
             start_diff = abs(punch_hour - start_hr)
             end_diff = abs(punch_hour - end_hr)
             
@@ -137,53 +133,66 @@ def load_data(_shift_configs):
     
     return daily_summary
 
-df = load_data(SHIFT_CONFIGS)
+df = load_data(WEEKLY_CONFIGS)
 
 # --- 5. TABS FOR DASHBOARD & SETTINGS ---
 tab1, tab2 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings"])
 
 with tab2:
-    st.markdown("### Manage Staff Shift Schedules")
-    st.write("Set start times, end times (24-hour format), and designated Days Off. Unscheduled days with no punches will be tracked as Absences.")
+    st.markdown("### 📅 Weekly Roster & Schedules")
+    st.write("Select an employee below to edit their specific daily shift times. Anyone without custom settings defaults to 8:00 AM - 5:00 PM.")
     
     if not df.empty:
-        unique_staff = df['Employee Name'].dropna().unique()
-        staff_schedules = []
-        for staff in unique_staff:
-            conf = SHIFT_CONFIGS.get(staff, {})
-            staff_schedules.append({
-                "employee_name": staff, 
-                "start_hour": conf.get('start_hour', 8),
-                "end_hour": conf.get('end_hour', 17),
-                "day_off": conf.get('day_off', 'None')
-            })
-        ui_sched_df = pd.DataFrame(staff_schedules)
-    else:
-        ui_sched_df = pd.DataFrame(columns=["employee_name", "start_hour", "end_hour", "day_off"])
+        unique_staff = df['Employee Name'].dropna().unique().tolist()
         
-    edited_schedules = st.data_editor(
-        ui_sched_df, 
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "employee_name": st.column_config.TextColumn("Employee Name", disabled=True),
-            "start_hour": st.column_config.NumberColumn("Start Hour (0-23)", min_value=0, max_value=23, required=True),
-            "end_hour": st.column_config.NumberColumn("End Hour (0-23)", min_value=0, max_value=23, required=True),
-            "day_off": st.column_config.SelectboxColumn(
-                "Day Off",
-                options=["None", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
-                required=True
-            )
-        }
-    )
-    
-    if st.button("💾 Save Schedules to System"):
-        records_to_save = edited_schedules.to_dict(orient="records")
-        if records_to_save:
-            supabase.table("shift_schedules").upsert(records_to_save).execute()
-        st.success("Schedules updated! The attendance dashboard is recalculating punches and absences based on your new rules.")
-        load_data.clear()
-        st.rerun()
+        selected_emp = st.selectbox("Select Staff Member to Edit", unique_staff)
+        st.markdown(f"#### Editing Schedule for: **{selected_emp}**")
+        
+        # Load this employee's weekly config
+        emp_config = WEEKLY_CONFIGS.get(selected_emp, {})
+        days_of_week = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        
+        week_data = []
+        for d in days_of_week:
+            d_conf = emp_config.get(d, {"start": 8, "end": 17, "off": False})
+            week_data.append({
+                "Day": d,
+                "Day Off?": d_conf["off"],
+                "Start Hour (0-23)": d_conf["start"],
+                "End Hour (0-23)": d_conf["end"]
+            })
+            
+        edited_week = st.data_editor(
+            pd.DataFrame(week_data),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Day": st.column_config.TextColumn("Day of Week", disabled=True),
+                "Day Off?": st.column_config.CheckboxColumn("Mark as Day Off"),
+                "Start Hour (0-23)": st.column_config.NumberColumn("Start Time (Hour)", min_value=0, max_value=23),
+                "End Hour (0-23)": st.column_config.NumberColumn("End Time (Hour)", min_value=0, max_value=23)
+            }
+        )
+        
+        if st.button(f"💾 Save Weekly Schedule for {selected_emp}"):
+            # Convert UI table back into JSON format
+            new_schedule = {}
+            for _, row in edited_week.iterrows():
+                new_schedule[row["Day"]] = {
+                    "start": int(row["Start Hour (0-23)"]),
+                    "end": int(row["End Hour (0-23)"]),
+                    "off": bool(row["Day Off?"])
+                }
+            
+            # Upsert directly to Supabase
+            supabase.table("weekly_schedules").upsert({
+                "employee_name": selected_emp,
+                "schedule_data": new_schedule
+            }).execute()
+            
+            st.success(f"Successfully saved custom weekly schedule for {selected_emp}!")
+            load_data.clear()
+            st.rerun()
 
 with tab1:
     if df.empty:
@@ -249,7 +258,6 @@ with tab1:
         
         display_df = filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].copy()
         
-        # Formatting for the table presentation
         display_df['Date'] = pd.to_datetime(display_df['Date']).dt.strftime('%d/%m/%Y')
         display_df['Hours'] = display_df['Hours'].map(lambda x: f"{float(x):.2f}")
 
@@ -259,7 +267,7 @@ with tab1:
             elif 'Incomplete' in row['Status']:
                 return ['background-color: #FFF4E5; color: #ED6C02'] * len(row)
             elif row['Status'] == 'Day Off':
-                return ['background-color: #F3F4F6; color: #6B7280'] * len(row) # Grey for day off
+                return ['background-color: #F3F4F6; color: #6B7280'] * len(row)
             else:
                 return [''] * len(row)
 
