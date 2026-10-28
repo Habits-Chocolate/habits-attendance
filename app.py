@@ -15,7 +15,7 @@ st.markdown("""
     h1, h2, h3, h4, h5, h6, p, label, span {
         color: #5C3A21 !important;
     }
-    /* Metric Cards */
+    /* Metric Cards with Hover Animations */
     div[data-testid="metric-container"] {
         background-color: #FFFFFF;
         border: 1px solid #EADDCD;
@@ -30,45 +30,44 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("HABITS Attendance & Time Tracking")
+# Custom Title to match original screenshot
+st.markdown("<h1 style='color: #5C3A21;'><b>HABITS</b> <span style='color: #A99B8E; font-size: 28px;'>Attendance & Time Tracking</span></h1>", unsafe_allow_html=True)
 
 # --- 2. SUPABASE CONNECTION ---
 @st.cache_resource
 def init_connection():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 supabase = init_connection()
 
 # --- 3. FETCH & PROCESS DATA ---
-@st.cache_data(ttl=600) # Caches data for 10 minutes to load faster
+@st.cache_data(ttl=600)
 def load_data():
-    # Fetch all records (Supabase max rows is now 100,000)
     response = supabase.table("attendance_logs").select("*").execute()
-    
     if not response.data:
         return pd.DataFrame()
         
     df = pd.DataFrame(response.data)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['Date'] = df['timestamp'].dt.date
-    df['Time'] = df['timestamp'].dt.time
     df['Month'] = df['timestamp'].dt.strftime('%B %Y')
     
-    # Process check-ins and check-outs per employee per day
-    daily_summary = df.groupby(['employee_id', 'Date']).agg(
+    # Preserves your actual employee names from the database instead of dummy data
+    if 'Employee Name' not in df.columns:
+        df['Employee Name'] = df.get('name', df['employee_id'])
+        
+    # Group to find daily in/out
+    daily_summary = df.groupby(['employee_id', 'Employee Name', 'Date', 'Month']).agg(
         Check_In=('timestamp', 'min'),
         Check_Out=('timestamp', 'max')
     ).reset_index()
 
-    # Calculate hours and determine status
     def determine_status(row):
         if pd.isna(row['Check_In']) and pd.isna(row['Check_Out']):
             return "Absent", 0.0, "-", "-"
         if row['Check_In'] == row['Check_Out']:
             time_str = row['Check_In'].strftime('%H:%M')
-            if row['Check_In'].hour >= 12: # Assumes missing IN if only punch is in the afternoon
+            if row['Check_In'].hour >= 12: 
                 return "Incomplete (No In)", 0.0, "MISSING IN", time_str
             else:
                 return "Incomplete (No Out)", 0.0, time_str, "MISSING OUT"
@@ -81,25 +80,22 @@ def load_data():
     status_data = daily_summary.apply(determine_status, axis=1, result_type='expand')
     daily_summary[['Status', 'Hours', 'Check In', 'Check Out']] = status_data
     
-    # Add dummy employee names (Replace with an actual mapping or database join later)
-    daily_summary['Employee Name'] = "Emp " + daily_summary['employee_id'].astype(str)
-    
-    # Include month for filtering
-    daily_summary['Month'] = pd.to_datetime(daily_summary['Date']).dt.strftime('%B %Y')
+    # Renames ID column to exactly match your original UI
+    daily_summary.rename(columns={'employee_id': 'ID'}, inplace=True)
     
     return daily_summary
 
 df = load_data()
 
 if df.empty:
-    st.info("No attendance records found in the cloud database.")
+    st.info("No records found.")
     st.stop()
 
 # --- 4. FILTERS ---
 st.markdown("### DATA EXTRACTION & FILTERS")
 col1, col2, col3 = st.columns(3)
 
-# Chronological Month Sorting
+# The fix: forces months to sort chronologically 
 months = df['Month'].dropna().unique().tolist()
 months.sort(key=lambda date: pd.to_datetime(date, format='%B %Y'), reverse=True)
 
@@ -124,15 +120,10 @@ if selected_date:
 st.markdown("### SUMMARY STATISTICS")
 m1, m2, m3, m4 = st.columns(4)
 
-total_hours = filtered_df['Hours'].sum()
-completed_shifts = len(filtered_df[filtered_df['Status'] == 'Complete'])
-total_absences = len(filtered_df[filtered_df['Status'] == 'Absent'])
-missing_punches = len(filtered_df[filtered_df['Status'].str.contains('Incomplete')])
-
-m1.metric("Total Logged Hours", f"{total_hours:.1f}")
-m2.metric("Completed Shifts", completed_shifts)
-m3.metric("Total Absences", total_absences)
-m4.metric("Missing Punches", missing_punches)
+m1.metric("Total Logged Hours", f"{filtered_df['Hours'].sum():.1f}")
+m2.metric("Completed Shifts", len(filtered_df[filtered_df['Status'] == 'Complete']))
+m3.metric("Total Absences", len(filtered_df[filtered_df['Status'] == 'Absent']))
+m4.metric("Missing Punches", len(filtered_df[filtered_df['Status'].str.contains('Incomplete')]))
 
 st.divider()
 
@@ -146,12 +137,28 @@ with col_table1:
     st.dataframe(totals, use_container_width=True, hide_index=True)
 
 with col_table2:
-    st.markdown("##### DAILY SHIFT TRACKER (ABSENCES & ERRORS)")
+    col_title, col_btn = st.columns([3, 1])
+    with col_title:
+        st.markdown("##### DAILY SHIFT TRACKER (ABSENCES & ERRORS)")
+    with col_btn:
+        # Excel Export logic with xlsxwriter
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].to_excel(writer, index=False, sheet_name='Attendance')
+        
+        st.download_button(
+            label="📥 Export to Excel",
+            data=buffer,
+            file_name="Habits_Attendance_Report.xlsx",
+            mime="application/vnd.ms-excel",
+            use_container_width=True
+        )
     
-    display_df = filtered_df[['employee_id', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].copy()
+    display_df = filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].copy()
     display_df['Date'] = pd.to_datetime(display_df['Date']).dt.strftime('%d/%m/%Y')
     display_df['Hours'] = display_df['Hours'].map('{:.2f}'.format)
 
+    # Your exact original row highlighting logic
     def highlight_status(row):
         if row['Status'] == 'Absent':
             return ['background-color: #FFEAEE; color: #D32F2F'] * len(row)
@@ -162,16 +169,3 @@ with col_table2:
 
     styled_tracker = display_df.style.apply(highlight_status, axis=1)
     st.dataframe(styled_tracker, use_container_width=True, hide_index=True)
-    
-    # Excel Export
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        display_df.to_excel(writer, index=False, sheet_name='Attendance')
-    
-    st.download_button(
-        label="📥 Export to Excel",
-        data=buffer,
-        file_name="Habits_Attendance_Report.xlsx",
-        mime="application/vnd.ms-excel",
-        use_container_width=True
-    )
