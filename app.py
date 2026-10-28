@@ -15,22 +15,34 @@ st.markdown("""
     h1, h2, h3, h4, h5, h6, p, label, span {
         color: #5C3A21 !important;
     }
-    /* Metric Cards with Hover Animations */
+    
+    /* Professional Pill-Shaped Metric Cards */
     div[data-testid="metric-container"] {
         background-color: #FFFFFF;
         border: 1px solid #EADDCD;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
-        transition: transform 0.2s ease-in-out;
+        padding: 15px 30px;
+        border-radius: 50px !important;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.04);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s ease;
     }
+    
     div[data-testid="metric-container"]:hover {
-        transform: translateY(-3px);
+        transform: translateY(-4px);
+        box-shadow: 0 8px 16px rgba(92, 58, 33, 0.12);
+        border-color: #A99B8E;
+    }
+    
+    div[data-testid="stMetricValue"] > div {
+        color: #5C3A21 !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# Custom Title to match original screenshot
+# Custom Title 
 st.markdown("<h1 style='color: #5C3A21;'><b>HABITS</b> <span style='color: #A99B8E; font-size: 28px;'>Attendance & Time Tracking</span></h1>", unsafe_allow_html=True)
 
 # --- 2. SUPABASE CONNECTION ---
@@ -52,11 +64,9 @@ def load_data():
     df['Date'] = df['timestamp'].dt.date
     df['Month'] = df['timestamp'].dt.strftime('%B %Y')
     
-    # Preserves your actual employee names from the database instead of dummy data
     if 'Employee Name' not in df.columns:
         df['Employee Name'] = df.get('name', df['employee_id'])
         
-    # Group to find daily in/out
     daily_summary = df.groupby(['employee_id', 'Employee Name', 'Date', 'Month']).agg(
         Check_In=('timestamp', 'min'),
         Check_Out=('timestamp', 'max')
@@ -80,7 +90,6 @@ def load_data():
     status_data = daily_summary.apply(determine_status, axis=1, result_type='expand')
     daily_summary[['Status', 'Hours', 'Check In', 'Check Out']] = status_data
     
-    # Renames ID column to exactly match your original UI
     daily_summary.rename(columns={'employee_id': 'ID'}, inplace=True)
     
     return daily_summary
@@ -95,7 +104,7 @@ if df.empty:
 st.markdown("### DATA EXTRACTION & FILTERS")
 col1, col2, col3 = st.columns(3)
 
-# The fix: forces months to sort chronologically 
+# Chronological month sorting
 months = df['Month'].dropna().unique().tolist()
 months.sort(key=lambda date: pd.to_datetime(date, format='%B %Y'), reverse=True)
 
@@ -141,7 +150,6 @@ with col_table2:
     with col_title:
         st.markdown("##### DAILY SHIFT TRACKER (ABSENCES & ERRORS)")
     with col_btn:
-        # Excel Export logic with xlsxwriter
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
             filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].to_excel(writer, index=False, sheet_name='Attendance')
@@ -158,7 +166,6 @@ with col_table2:
     display_df['Date'] = pd.to_datetime(display_df['Date']).dt.strftime('%d/%m/%Y')
     display_df['Hours'] = display_df['Hours'].map('{:.2f}'.format)
 
-    # Your exact original row highlighting logic
     def highlight_status(row):
         if row['Status'] == 'Absent':
             return ['background-color: #FFEAEE; color: #D32F2F'] * len(row)
