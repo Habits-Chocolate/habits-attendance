@@ -145,7 +145,6 @@ def load_data(_weekly_configs, _excuses_dict):
 
 df = load_data(WEEKLY_CONFIGS, EXCUSES_DICT)
 
-# List of official excuse types
 EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Business Trip", "Other"]
 
 # --- 5. TABS ---
@@ -191,40 +190,43 @@ with tab3:
                     st.cache_data.clear()
                     st.rerun()
                 
-        # --- INLINE DELETE LIST ---
+        # --- FAST INLINE DELETE TABLE ---
         if EXCUSES_DICT:
             st.markdown("##### Recent Logged Excuses")
+            st.write("Check the box next to any excuse you want to remove, then click Confirm.")
             
-            # Sort excuses by date so the newest are at the top
-            sorted_excuses = sorted([
-                {"Employee": k[0], "Date": k[1], "Reason": v} for k, v in EXCUSES_DICT.items()
-            ], key=lambda x: x["Date"], reverse=True)
+            # Format dictionary into a fast list for the data editor
+            excuse_list = [{"Employee": k[0], "Date": k[1], "Reason": v, "❌ Delete": False} for k, v in EXCUSES_DICT.items()]
+            excuse_df_display = pd.DataFrame(excuse_list).sort_values(by="Date", ascending=False)
             
-            # Create a scrollable container for the inline list
-            with st.container(height=350):
-                # Header Row
-                col_h1, col_h2, col_h3, col_h4 = st.columns([3, 2, 3, 2])
-                col_h1.markdown("**Employee**")
-                col_h2.markdown("**Date**")
-                col_h3.markdown("**Reason**")
-                col_h4.markdown("**Action**")
-                
-                # Render each excuse with a delete button
-                for idx, ex in enumerate(sorted_excuses):
-                    c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
-                    c1.write(ex["Employee"])
-                    c2.write(ex["Date"])
-                    c3.write(ex["Reason"])
-                    if c4.button("❌ Remove", key=f"inline_del_{ex['Employee']}_{ex['Date']}_{idx}"):
-                        supabase.table("attendance_excuses").delete().eq("employee_name", ex["Employee"]).eq("excuse_date", ex["Date"]).execute()
-                        st.cache_data.clear()
-                        st.rerun()
+            # Render a high-speed native Streamlit interactive table
+            edited_excuses = st.data_editor(
+                excuse_df_display,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["Employee", "Date", "Reason"], # Locks the text columns so they can't be accidentally changed
+                column_config={
+                    "❌ Delete": st.column_config.CheckboxColumn("Select to Delete", default=False)
+                }
+            )
+            
+            # Filter the table for any rows the user checked
+            rows_to_delete = edited_excuses[edited_excuses["❌ Delete"] == True]
+            
+            if not rows_to_delete.empty:
+                if st.button("🗑️ Confirm Deletion of Selected"):
+                    for _, row in rows_to_delete.iterrows():
+                        supabase.table("attendance_excuses").delete().eq("employee_name", row["Employee"]).eq("excuse_date", row["Date"]).execute()
+                    
+                    st.success(f"Successfully removed {len(rows_to_delete)} excuse(s).")
+                    st.cache_data.clear()
+                    st.rerun()
             
             st.divider()
             
             # --- BULK DELETE SECTION ---
             st.markdown("##### 🗑️ Bulk Remove Excuses")
-            st.write("Need to wipe a large date range? Select the employee and the dates below.")
+            st.write("Need to completely wipe a large date range? Select the employee and the dates below.")
             with st.form("delete_excuse_form"):
                 col_del_1, col_del_2, col_del_3 = st.columns(3)
                 with col_del_1:
