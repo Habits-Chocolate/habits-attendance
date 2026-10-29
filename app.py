@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client
 import io
+from datetime import timedelta
 
 # --- 1. PAGE CONFIG & CHOCOLATE THEME ---
 st.set_page_config(page_title="HABITS Attendance", layout="wide")
@@ -152,34 +153,41 @@ tab1, tab2, tab3 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings", "�
 
 with tab3:
     st.markdown("### 📝 Log a Leave or Excuse")
-    st.write("Has a staff member missed work for a valid reason? Log it here. This will automatically overwrite any 'Absent' or 'Missing Punch' errors for that day.")
+    st.write("Log a valid excuse for an employee. Select the Start and End date (keep them the same for a single day).")
     
     if not df.empty:
         unique_staff = df['Employee Name'].dropna().unique().tolist()
         
         with st.form("excuse_form"):
-            colA, colB, colC = st.columns(3)
+            colA, colB, colC, colD = st.columns(4)
             with colA:
                 excuse_emp = st.selectbox("Select Employee", unique_staff)
             with colB:
-                excuse_date = st.date_input("Select Date")
+                start_date = st.date_input("From Date")
             with colC:
+                end_date = st.date_input("To Date")
+            with colD:
                 excuse_reason = st.selectbox("Reason", EXCUSE_TYPES)
                 
             submit_excuse = st.form_submit_button("💾 Save Official Excuse")
             
             if submit_excuse:
-                # Delete any old excuse for this exact day to avoid database duplicates, then insert the new one
-                supabase.table("attendance_excuses").delete().eq("employee_name", excuse_emp).eq("excuse_date", str(excuse_date)).execute()
-                supabase.table("attendance_excuses").insert({
-                    "employee_name": excuse_emp,
-                    "excuse_date": str(excuse_date),
-                    "reason": excuse_reason
-                }).execute()
-                
-                st.success(f"Excuse saved! {excuse_emp} is now marked as '{excuse_reason}' for {excuse_date}.")
-                load_data.clear()
-                st.rerun()
+                if start_date > end_date:
+                    st.error("Error: 'From Date' cannot be after 'To Date'.")
+                else:
+                    date_list = pd.date_range(start=start_date, end=end_date)
+                    for single_date in date_list:
+                        date_str = single_date.strftime('%Y-%m-%d')
+                        supabase.table("attendance_excuses").delete().eq("employee_name", excuse_emp).eq("excuse_date", date_str).execute()
+                        supabase.table("attendance_excuses").insert({
+                            "employee_name": excuse_emp,
+                            "excuse_date": date_str,
+                            "reason": excuse_reason
+                        }).execute()
+                    
+                    st.success(f"Excuse saved! {excuse_emp} is now marked as '{excuse_reason}' from {start_date} to {end_date}.")
+                    load_data.clear()
+                    st.rerun()
                 
         # Show existing excuses
         if EXCUSES_DICT:
@@ -188,6 +196,35 @@ with tab3:
                 {"Employee": k[0], "Date": k[1], "Reason": v} for k, v in EXCUSES_DICT.items()
             ]).sort_values(by="Date", ascending=False)
             st.dataframe(excuse_display, use_container_width=True, hide_index=True)
+            
+            st.divider()
+            
+            # --- DELETE EXCUSE SECTION ---
+            st.markdown("##### 🗑️ Remove an Excuse")
+            st.write("Made a mistake? Select the employee and the date range to instantly clear their excuses.")
+            with st.form("delete_excuse_form"):
+                col_del_1, col_del_2, col_del_3 = st.columns(3)
+                with col_del_1:
+                    del_emp = st.selectbox("Select Employee to clear", unique_staff)
+                with col_del_2:
+                    del_start = st.date_input("From Date", key="del_start")
+                with col_del_3:
+                    del_end = st.date_input("To Date", key="del_end")
+                    
+                submit_delete = st.form_submit_button("❌ Delete Excuse(s)")
+                
+                if submit_delete:
+                    if del_start > del_end:
+                        st.error("Error: 'From Date' cannot be after 'To Date'.")
+                    else:
+                        date_list = pd.date_range(start=del_start, end=del_end)
+                        for single_date in date_list:
+                            date_str = single_date.strftime('%Y-%m-%d')
+                            supabase.table("attendance_excuses").delete().eq("employee_name", del_emp).eq("excuse_date", date_str).execute()
+                        
+                        st.success(f"Successfully removed excuses for {del_emp} from {del_start} to {del_end}.")
+                        load_data.clear()
+                        st.rerun()
 
 with tab2:
     st.markdown("### 📅 Weekly Roster & Schedules")
@@ -306,7 +343,7 @@ with tab1:
                 format_absent = workbook.add_format({'bg_color': '#FFEAEE', 'font_color': '#D32F2F', 'border': 1})
                 format_incomplete = workbook.add_format({'bg_color': '#FFF4E5', 'font_color': '#ED6C02', 'border': 1})
                 format_dayoff = workbook.add_format({'bg_color': '#F3F4F6', 'font_color': '#6B7280', 'border': 1})
-                format_excuse = workbook.add_format({'bg_color': '#E3F2FD', 'font_color': '#1976D2', 'border': 1}) # Soft blue for excuses
+                format_excuse = workbook.add_format({'bg_color': '#E3F2FD', 'font_color': '#1976D2', 'border': 1})
                 
                 for col_num, value in enumerate(export_df.columns.values):
                     worksheet.write(0, col_num, value, header_format)
@@ -355,7 +392,7 @@ with tab1:
             elif row['Status'] == 'Day Off':
                 return ['background-color: #F3F4F6; color: #6B7280'] * len(row)
             elif row['Status'] in EXCUSE_TYPES:
-                return ['background-color: #E3F2FD; color: #1976D2'] * len(row) # Soft blue for excuses
+                return ['background-color: #E3F2FD; color: #1976D2'] * len(row)
             else:
                 return [''] * len(row)
 
