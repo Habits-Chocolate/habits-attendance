@@ -48,20 +48,24 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- 3. LOAD WEEKLY SCHEDULES FROM SUPABASE ---
+# --- 3. LOAD CONFIGS & EXCUSES FROM SUPABASE ---
 try:
     sched_res = supabase.table("weekly_schedules").select("*").execute()
     sched_df = pd.DataFrame(sched_res.data)
-    if not sched_df.empty:
-        WEEKLY_CONFIGS = sched_df.set_index('employee_name')['schedule_data'].to_dict()
-    else:
-        WEEKLY_CONFIGS = {}
+    WEEKLY_CONFIGS = sched_df.set_index('employee_name')['schedule_data'].to_dict() if not sched_df.empty else {}
 except:
     WEEKLY_CONFIGS = {}
 
+try:
+    excuse_res = supabase.table("attendance_excuses").select("*").execute()
+    excuse_df = pd.DataFrame(excuse_res.data)
+    EXCUSES_DICT = {(row['employee_name'], row['excuse_date']): row['reason'] for _, row in excuse_df.iterrows()} if not excuse_df.empty else {}
+except:
+    EXCUSES_DICT = {}
+
 # --- 4. FETCH & PROCESS DATA ---
 @st.cache_data(ttl=600)
-def load_data(_weekly_configs):
+def load_data(_weekly_configs, _excuses_dict):
     response = supabase.table("attendance_logs").select("*").limit(10000).execute()
     if not response.data:
         return pd.DataFrame()
@@ -92,7 +96,16 @@ def load_data(_weekly_configs):
     def determine_status(row):
         emp_name = row['Employee Name']
         day_name = row['Date'].strftime('%A')
+        date_str = str(row['Date'])
         
+        # 1. CHECK FOR OFFICIAL EXCUSE FIRST
+        if (emp_name, date_str) in _excuses_dict:
+            in_str = row['Check_In'].strftime('%H:%M') if not pd.isna(row['Check_In']) else "-"
+            out_str = row['Check_Out'].strftime('%H:%M') if not pd.isna(row['Check_Out']) else "-"
+            hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600 if not pd.isna(row['Check_In']) and not pd.isna(row['Check_Out']) else 0.0
+            return _excuses_dict[(emp_name, date_str)], round(hours, 2), in_str, out_str
+
+        # 2. NORMAL SCHEDULE LOGIC
         emp_config = _weekly_configs.get(emp_name, {})
         day_config = emp_config.get(day_name, {"start": 8, "end": 17, "off": False})
         
@@ -129,10 +142,52 @@ def load_data(_weekly_configs):
     
     return daily_summary
 
-df = load_data(WEEKLY_CONFIGS)
+df = load_data(WEEKLY_CONFIGS, EXCUSES_DICT)
 
-# --- 5. TABS FOR DASHBOARD & SETTINGS ---
-tab1, tab2 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings"])
+# List of official excuse types
+EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Business Trip", "Other"]
+
+# --- 5. TABS ---
+tab1, tab2, tab3 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings", "📝 Leaves & Excuses"])
+
+with tab3:
+    st.markdown("### 📝 Log a Leave or Excuse")
+    st.write("Has a staff member missed work for a valid reason? Log it here. This will automatically overwrite any 'Absent' or 'Missing Punch' errors for that day.")
+    
+    if not df.empty:
+        unique_staff = df['Employee Name'].dropna().unique().tolist()
+        
+        with st.form("excuse_form"):
+            colA, colB, colC = st.columns(3)
+            with colA:
+                excuse_emp = st.selectbox("Select Employee", unique_staff)
+            with colB:
+                excuse_date = st.date_input("Select Date")
+            with colC:
+                excuse_reason = st.selectbox("Reason", EXCUSE_TYPES)
+                
+            submit_excuse = st.form_submit_button("💾 Save Official Excuse")
+            
+            if submit_excuse:
+                # Delete any old excuse for this exact day to avoid database duplicates, then insert the new one
+                supabase.table("attendance_excuses").delete().eq("employee_name", excuse_emp).eq("excuse_date", str(excuse_date)).execute()
+                supabase.table("attendance_excuses").insert({
+                    "employee_name": excuse_emp,
+                    "excuse_date": str(excuse_date),
+                    "reason": excuse_reason
+                }).execute()
+                
+                st.success(f"Excuse saved! {excuse_emp} is now marked as '{excuse_reason}' for {excuse_date}.")
+                load_data.clear()
+                st.rerun()
+                
+        # Show existing excuses
+        if EXCUSES_DICT:
+            st.markdown("##### Recent Logged Excuses")
+            excuse_display = pd.DataFrame([
+                {"Employee": k[0], "Date": k[1], "Reason": v} for k, v in EXCUSES_DICT.items()
+            ]).sort_values(by="Date", ascending=False)
+            st.dataframe(excuse_display, use_container_width=True, hide_index=True)
 
 with tab2:
     st.markdown("### 📅 Weekly Roster & Schedules")
@@ -140,7 +195,6 @@ with tab2:
     
     if not df.empty:
         unique_staff = df['Employee Name'].dropna().unique().tolist()
-        
         selected_emp = st.selectbox("Select Staff Member to Edit", unique_staff)
         st.markdown(f"#### Editing Schedule for: **{selected_emp}**")
         
@@ -237,7 +291,6 @@ with tab1:
         with col_title:
             st.markdown("##### DAILY SHIFT TRACKER (ABSENCES & ERRORS)")
         with col_btn:
-            # Excel Export logic with styling
             buffer = io.BytesIO()
             export_df = filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].copy()
             export_df['Date'] = pd.to_datetime(export_df['Date']).dt.strftime('%d/%m/%Y')
@@ -248,25 +301,23 @@ with tab1:
                 workbook  = writer.book
                 worksheet = writer.sheets['Attendance']
                 
-                # Define Professional Formats
                 header_format = workbook.add_format({'bold': True, 'bg_color': '#5C3A21', 'font_color': 'white', 'border': 1})
                 format_complete = workbook.add_format({'bg_color': '#FFFFFF', 'border': 1})
                 format_absent = workbook.add_format({'bg_color': '#FFEAEE', 'font_color': '#D32F2F', 'border': 1})
                 format_incomplete = workbook.add_format({'bg_color': '#FFF4E5', 'font_color': '#ED6C02', 'border': 1})
                 format_dayoff = workbook.add_format({'bg_color': '#F3F4F6', 'font_color': '#6B7280', 'border': 1})
+                format_excuse = workbook.add_format({'bg_color': '#E3F2FD', 'font_color': '#1976D2', 'border': 1}) # Soft blue for excuses
                 
-                # Apply Header Styles and Column Widths
                 for col_num, value in enumerate(export_df.columns.values):
                     worksheet.write(0, col_num, value, header_format)
                 
-                worksheet.set_column('A:A', 8)  # ID
-                worksheet.set_column('B:B', 20) # Employee Name
-                worksheet.set_column('C:C', 15) # Date
-                worksheet.set_column('D:E', 12) # Check In / Check Out
-                worksheet.set_column('F:F', 10) # Hours
-                worksheet.set_column('G:G', 25) # Status
+                worksheet.set_column('A:A', 8)
+                worksheet.set_column('B:B', 20)
+                worksheet.set_column('C:C', 15)
+                worksheet.set_column('D:E', 12)
+                worksheet.set_column('F:F', 10)
+                worksheet.set_column('G:G', 25)
                 
-                # Apply Color Coding per Row
                 for row_num in range(len(export_df)):
                     status = export_df.iloc[row_num]['Status']
                     if status == 'Absent':
@@ -275,6 +326,8 @@ with tab1:
                         row_format = format_incomplete
                     elif status == 'Day Off':
                         row_format = format_dayoff
+                    elif status in EXCUSE_TYPES:
+                        row_format = format_excuse
                     else:
                         row_format = format_complete
                         
@@ -291,7 +344,6 @@ with tab1:
             )
         
         display_df = filtered_df[['ID', 'Employee Name', 'Date', 'Check In', 'Check Out', 'Hours', 'Status']].copy()
-        
         display_df['Date'] = pd.to_datetime(display_df['Date']).dt.strftime('%d/%m/%Y')
         display_df['Hours'] = display_df['Hours'].map(lambda x: f"{float(x):.2f}")
 
@@ -302,6 +354,8 @@ with tab1:
                 return ['background-color: #FFF4E5; color: #ED6C02'] * len(row)
             elif row['Status'] == 'Day Off':
                 return ['background-color: #F3F4F6; color: #6B7280'] * len(row)
+            elif row['Status'] in EXCUSE_TYPES:
+                return ['background-color: #E3F2FD; color: #1976D2'] * len(row) # Soft blue for excuses
             else:
                 return [''] * len(row)
 
