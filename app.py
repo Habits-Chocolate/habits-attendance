@@ -99,14 +99,6 @@ def load_data(_weekly_configs, _excuses_dict):
         day_name = row['Date'].strftime('%A')
         date_str = str(row['Date'])
         
-        # 1. CHECK FOR OFFICIAL EXCUSE FIRST
-        if (emp_name, date_str) in _excuses_dict:
-            in_str = row['Check_In'].strftime('%H:%M') if not pd.isna(row['Check_In']) else "-"
-            out_str = row['Check_Out'].strftime('%H:%M') if not pd.isna(row['Check_Out']) else "-"
-            hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600 if not pd.isna(row['Check_In']) and not pd.isna(row['Check_Out']) else 0.0
-            return _excuses_dict[(emp_name, date_str)], round(hours, 2), in_str, out_str
-
-        # 2. NORMAL SCHEDULE LOGIC
         emp_config = _weekly_configs.get(emp_name, {})
         day_config = emp_config.get(day_name, {"start": 8, "end": 17, "off": False})
         
@@ -114,6 +106,38 @@ def load_data(_weekly_configs, _excuses_dict):
         end_hr = day_config["end"]
         is_off = day_config["off"]
         
+        excuse = _excuses_dict.get((emp_name, date_str))
+
+        # --- 1. DUTY TIME CHANGE LOGIC ---
+        # If the excuse is a shift override, update the start/end times for today and clear the excuse
+        # so the system checks their punches normally against the new times.
+        if excuse and excuse.startswith("Shift Override:"):
+            try:
+                times = excuse.replace("Shift Override:", "").strip().split(" to ")
+                start_hr = int(times[0])
+                end_hr = int(times[1])
+                is_off = False # They are definitely working today
+                excuse = None 
+            except:
+                pass
+
+        # --- 2. STANDARD EXCUSE & EARLY LEAVE LOGIC ---
+        if excuse:
+            in_str = row['Check_In'].strftime('%H:%M') if not pd.isna(row['Check_In']) else "-"
+            out_str = row['Check_Out'].strftime('%H:%M') if not pd.isna(row['Check_Out']) else "-"
+            hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600 if not pd.isna(row['Check_In']) and not pd.isna(row['Check_Out']) else 0.0
+            
+            # Add the missing hours to their daily total so salary is not affected
+            if excuse.startswith("Early Leave ("):
+                try:
+                    bonus = float(excuse.split("(")[1].split(" ")[0])
+                    hours += bonus
+                except:
+                    pass
+                    
+            return excuse, round(hours, 2), in_str, out_str
+
+        # --- 3. NORMAL SHIFT LOGIC ---
         if pd.isna(row['Check_In']) and pd.isna(row['Check_Out']):
             if is_off:
                 return "Day Off", 0.0, "-", "-"
@@ -135,6 +159,11 @@ def load_data(_weekly_configs, _excuses_dict):
         hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600
         in_str = row['Check_In'].strftime('%H:%M')
         out_str = row['Check_Out'].strftime('%H:%M')
+        
+        # If they had a Shift Override and successfully completed it, label it correctly
+        if _excuses_dict.get((emp_name, date_str), "").startswith("Shift Override:"):
+            return "Complete (Shift Changed)", round(hours, 2), in_str, out_str
+            
         return "Complete", round(hours, 2), in_str, out_str
 
     status_data = daily_summary.apply(determine_status, axis=1, result_type='expand')
@@ -145,15 +174,15 @@ def load_data(_weekly_configs, _excuses_dict):
 
 df = load_data(WEEKLY_CONFIGS, EXCUSES_DICT)
 
-# Added Swapped Day Off to the list
-EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Business Trip", "Swapped Day Off", "Other"]
+# Added Early Leave and Duty Time Change
+EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Business Trip", "Swapped Day Off", "Early Leave", "Duty Time Change", "Other"]
 
 # --- 5. TABS ---
 tab1, tab2, tab3 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings", "📝 Leaves & Excuses"])
 
 with tab3:
-    st.markdown("### 📝 Log a Leave or Excuse (Date Range)")
-    st.write("Log a valid excuse for an employee. Select the Start and End date (keep them the same for a single day).")
+    st.markdown("### 📝 Log a Leave, Excuse, or Schedule Change")
+    st.write("Manage absences, early leaves, and temporary shift changes here without affecting their permanent master schedule.")
     
     if not df.empty:
         unique_staff = df['Employee Name'].dropna().unique().tolist()
@@ -169,10 +198,25 @@ with tab3:
             excuse_reason = st.selectbox("Reason", EXCUSE_TYPES, key="add_reason")
             
         final_reason = excuse_reason
+        
+        # DYNAMIC INPUT BOXES BASED ON SELECTION
         if excuse_reason == "Other":
             final_reason = st.text_input("Please specify the reason:", key="custom_reason_input")
             
-        submit_excuse = st.button("💾 Save Official Excuse")
+        elif excuse_reason == "Early Leave":
+            early_hrs = st.number_input("Hours missing (this will automatically be added to their daily total):", min_value=0.5, max_value=24.0, step=0.5, value=1.0)
+            final_reason = f"Early Leave ({early_hrs} Hours)"
+            
+        elif excuse_reason == "Duty Time Change":
+            st.info("The system will temporarily check their punches against these new hours.")
+            col_s, col_e = st.columns(2)
+            with col_s:
+                new_start = st.number_input("New Start Hour (0-23)", min_value=0, max_value=23, value=8)
+            with col_e:
+                new_end = st.number_input("New End Hour (0-23)", min_value=0, max_value=23, value=17)
+            final_reason = f"Shift Override: {new_start} to {new_end}"
+            
+        submit_excuse = st.button("💾 Save to System")
         
         if submit_excuse:
             if start_date > end_date:
@@ -192,14 +236,14 @@ with tab3:
                 for i in range(0, len(records_to_insert), 1000):
                     supabase.table("attendance_excuses").insert(records_to_insert[i:i+1000]).execute()
                 
-                st.success(f"Excuse saved! {excuse_emp} is now marked as '{final_reason}' from {start_date} to {end_date}.")
+                st.success(f"Successfully saved! {excuse_emp} is now marked as '{final_reason}' from {start_date} to {end_date}.")
                 st.cache_data.clear()
                 st.rerun()
                 
         # --- FAST INLINE DELETE TABLE ---
         if EXCUSES_DICT:
-            st.markdown("##### Recent Logged Excuses")
-            st.write("Check the box next to any excuse you want to remove, then click Confirm.")
+            st.markdown("##### Active Logged Events")
+            st.write("Check the box next to any excuse or shift change you want to undo, then click Confirm.")
             
             excuse_list = [{"Employee": k[0], "Date": k[1], "Reason": v, "❌ Delete": False} for k, v in EXCUSES_DICT.items()]
             excuse_df_display = pd.DataFrame(excuse_list).sort_values(by="Date", ascending=False)
@@ -210,25 +254,25 @@ with tab3:
                 hide_index=True,
                 disabled=["Employee", "Date", "Reason"], 
                 column_config={
-                    "❌ Delete": st.column_config.CheckboxColumn("Select to Delete", default=False)
+                    "❌ Delete": st.column_config.CheckboxColumn("Select to Undo", default=False)
                 }
             )
             
             rows_to_delete = edited_excuses[edited_excuses["❌ Delete"] == True]
             
             if not rows_to_delete.empty:
-                if st.button("🗑️ Confirm Deletion of Selected"):
+                if st.button("🗑️ Confirm Undo of Selected"):
                     for _, row in rows_to_delete.iterrows():
                         supabase.table("attendance_excuses").delete().eq("employee_name", row["Employee"]).eq("excuse_date", row["Date"]).execute()
                     
-                    st.success(f"Successfully removed {len(rows_to_delete)} excuse(s).")
+                    st.success(f"Successfully removed {len(rows_to_delete)} event(s).")
                     st.cache_data.clear()
                     st.rerun()
             
             st.divider()
             
             # --- BULK DELETE SECTION ---
-            st.markdown("##### 🗑️ Bulk Remove Excuses")
+            st.markdown("##### 🗑️ Bulk Remove Events")
             st.write("Need to completely wipe a large date range? Select the employee and the dates below.")
             with st.form("delete_excuse_form"):
                 col_del_1, col_del_2, col_del_3 = st.columns(3)
@@ -239,7 +283,7 @@ with tab3:
                 with col_del_3:
                     del_end = st.date_input("To Date", key="del_end")
                     
-                submit_delete = st.form_submit_button("❌ Bulk Delete Excuse(s)")
+                submit_delete = st.form_submit_button("❌ Bulk Delete Event(s)")
                 
                 if submit_delete:
                     if del_start > del_end:
@@ -251,13 +295,13 @@ with tab3:
                         
                         supabase.table("attendance_excuses").delete().eq("employee_name", emp_str).gte("excuse_date", start_str).lte("excuse_date", end_str).execute()
                         
-                        st.success(f"Successfully removed excuses for {del_emp} from {del_start} to {del_end}.")
+                        st.success(f"Successfully removed events for {del_emp} from {del_start} to {del_end}.")
                         st.cache_data.clear()
                         st.rerun()
 
 with tab2:
     st.markdown("### 📅 Weekly Roster & Schedules")
-    st.info("💡 **Handling Temporary Swaps:** If an employee is just swapping their Day Off for one week, **do not change their schedule here**, as it will retroactively alter their past data. Instead, go to the 'Leaves & Excuses' tab and log a **'Swapped Day Off'** for that specific date.")
+    st.info("💡 **Temporary Changes:** Do not edit permanent schedules here for a one-day shift change or swapped day off. Go to the **Leaves & Excuses** tab to log temporary overrides without breaking their past history.")
     
     if not df.empty:
         unique_staff = df['Employee Name'].dropna().unique().tolist()
@@ -390,9 +434,9 @@ with tab1:
                         row_format = format_absent
                     elif 'Incomplete' in status:
                         row_format = format_incomplete
-                    elif status in ['Day Off', 'Swapped Day Off']: # Both trigger Grey
+                    elif status in ['Day Off', 'Swapped Day Off']:
                         row_format = format_dayoff
-                    elif status == 'Complete':
+                    elif 'Complete' in status:
                         row_format = format_complete
                     else:
                         row_format = format_excuse
@@ -418,9 +462,9 @@ with tab1:
                 return ['background-color: #FFEAEE; color: #D32F2F'] * len(row)
             elif 'Incomplete' in row['Status']:
                 return ['background-color: #FFF4E5; color: #ED6C02'] * len(row)
-            elif row['Status'] in ['Day Off', 'Swapped Day Off']: # Both trigger Grey
+            elif row['Status'] in ['Day Off', 'Swapped Day Off']: 
                 return ['background-color: #F3F4F6; color: #6B7280'] * len(row)
-            elif row['Status'] == 'Complete':
+            elif 'Complete' in row['Status']:
                 return [''] * len(row)
             else:
                 return ['background-color: #E3F2FD; color: #1976D2'] * len(row)
