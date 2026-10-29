@@ -65,7 +65,7 @@ except:
     EXCUSES_DICT = {}
 
 # --- 4. FETCH & PROCESS DATA ---
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)
 def load_data(_weekly_configs, _excuses_dict):
     response = supabase.table("attendance_logs").select("*").limit(10000).execute()
     if not response.data:
@@ -108,26 +108,23 @@ def load_data(_weekly_configs, _excuses_dict):
         
         excuse = _excuses_dict.get((emp_name, date_str))
 
-        # --- 1. DUTY TIME CHANGE LOGIC ---
-        # If the excuse is a shift override, update the start/end times for today and clear the excuse
-        # so the system checks their punches normally against the new times.
+        # --- DUTY TIME CHANGE LOGIC ---
         if excuse and excuse.startswith("Shift Override:"):
             try:
                 times = excuse.replace("Shift Override:", "").strip().split(" to ")
                 start_hr = int(times[0])
                 end_hr = int(times[1])
-                is_off = False # They are definitely working today
+                is_off = False 
                 excuse = None 
             except:
                 pass
 
-        # --- 2. STANDARD EXCUSE & EARLY LEAVE LOGIC ---
+        # --- STANDARD EXCUSE & EARLY LEAVE LOGIC ---
         if excuse:
             in_str = row['Check_In'].strftime('%H:%M') if not pd.isna(row['Check_In']) else "-"
             out_str = row['Check_Out'].strftime('%H:%M') if not pd.isna(row['Check_Out']) else "-"
             hours = (row['Check_Out'] - row['Check_In']).total_seconds() / 3600 if not pd.isna(row['Check_In']) and not pd.isna(row['Check_Out']) else 0.0
             
-            # Add the missing hours to their daily total so salary is not affected
             if excuse.startswith("Early Leave ("):
                 try:
                     bonus = float(excuse.split("(")[1].split(" ")[0])
@@ -137,7 +134,7 @@ def load_data(_weekly_configs, _excuses_dict):
                     
             return excuse, round(hours, 2), in_str, out_str
 
-        # --- 3. NORMAL SHIFT LOGIC ---
+        # --- NORMAL SHIFT LOGIC ---
         if pd.isna(row['Check_In']) and pd.isna(row['Check_Out']):
             if is_off:
                 return "Day Off", 0.0, "-", "-"
@@ -160,7 +157,6 @@ def load_data(_weekly_configs, _excuses_dict):
         in_str = row['Check_In'].strftime('%H:%M')
         out_str = row['Check_Out'].strftime('%H:%M')
         
-        # If they had a Shift Override and successfully completed it, label it correctly
         if _excuses_dict.get((emp_name, date_str), "").startswith("Shift Override:"):
             return "Complete (Shift Changed)", round(hours, 2), in_str, out_str
             
@@ -174,7 +170,6 @@ def load_data(_weekly_configs, _excuses_dict):
 
 df = load_data(WEEKLY_CONFIGS, EXCUSES_DICT)
 
-# Added Early Leave and Duty Time Change
 EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Business Trip", "Swapped Day Off", "Early Leave", "Duty Time Change", "Other"]
 
 # --- 5. TABS ---
@@ -199,7 +194,6 @@ with tab3:
             
         final_reason = excuse_reason
         
-        # DYNAMIC INPUT BOXES BASED ON SELECTION
         if excuse_reason == "Other":
             final_reason = st.text_input("Please specify the reason:", key="custom_reason_input")
             
@@ -352,6 +346,13 @@ with tab2:
             st.rerun()
 
 with tab1:
+    # --- INSTANT REFRESH BUTTON ---
+    col_dash_title, col_dash_btn = st.columns([4, 1])
+    with col_dash_btn:
+        if st.button("🔄 Refresh Live Data", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+            
     if df.empty:
         st.info("No attendance records found.")
         st.stop()
@@ -382,7 +383,7 @@ with tab1:
     m1, m2, m3, m4 = st.columns(4)
 
     m1.metric("Total Logged Hours", f"{filtered_df['Hours'].sum():.1f}")
-    m2.metric("Completed Shifts", len(filtered_df[filtered_df['Status'] == 'Complete']))
+    m2.metric("Completed Shifts", len(filtered_df[filtered_df['Status'].str.contains('Complete')]))
     m3.metric("Total Absences", len(filtered_df[filtered_df['Status'] == 'Absent']))
     m4.metric("Missing Punches", len(filtered_df[filtered_df['Status'].str.contains('Incomplete')]))
 
