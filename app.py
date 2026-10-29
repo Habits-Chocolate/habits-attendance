@@ -145,7 +145,8 @@ def load_data(_weekly_configs, _excuses_dict):
 
 df = load_data(WEEKLY_CONFIGS, EXCUSES_DICT)
 
-EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Business Trip", "Other"]
+# Added Swapped Day Off to the list
+EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Business Trip", "Swapped Day Off", "Other"]
 
 # --- 5. TABS ---
 tab1, tab2, tab3 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings", "📝 Leaves & Excuses"])
@@ -157,60 +158,62 @@ with tab3:
     if not df.empty:
         unique_staff = df['Employee Name'].dropna().unique().tolist()
         
-        with st.form("excuse_form"):
-            colA, colB, colC, colD = st.columns(4)
-            with colA:
-                excuse_emp = st.selectbox("Select Employee", unique_staff, key="add_emp")
-            with colB:
-                start_date = st.date_input("From Date", key="add_start")
-            with colC:
-                end_date = st.date_input("To Date", key="add_end")
-            with colD:
-                excuse_reason = st.selectbox("Reason", EXCUSE_TYPES, key="add_reason")
-                
-            submit_excuse = st.form_submit_button("💾 Save Official Excuse")
+        colA, colB, colC, colD = st.columns(4)
+        with colA:
+            excuse_emp = st.selectbox("Select Employee", unique_staff, key="add_emp")
+        with colB:
+            start_date = st.date_input("From Date", key="add_start")
+        with colC:
+            end_date = st.date_input("To Date", key="add_end")
+        with colD:
+            excuse_reason = st.selectbox("Reason", EXCUSE_TYPES, key="add_reason")
             
-            if submit_excuse:
-                if start_date > end_date:
-                    st.error("Error: 'From Date' cannot be after 'To Date'.")
-                else:
-                    emp_str = str(excuse_emp)
-                    start_str = str(start_date)
-                    end_str = str(end_date)
-                    
-                    supabase.table("attendance_excuses").delete().eq("employee_name", emp_str).gte("excuse_date", start_str).lte("excuse_date", end_str).execute()
-                    
-                    date_list = pd.date_range(start=start_date, end=end_date)
-                    records_to_insert = [{"employee_name": emp_str, "excuse_date": str(single_date.strftime('%Y-%m-%d')), "reason": excuse_reason} for single_date in date_list]
-                    
-                    for i in range(0, len(records_to_insert), 1000):
-                        supabase.table("attendance_excuses").insert(records_to_insert[i:i+1000]).execute()
-                    
-                    st.success(f"Excuse saved! {excuse_emp} is now marked as '{excuse_reason}' from {start_date} to {end_date}.")
-                    st.cache_data.clear()
-                    st.rerun()
+        final_reason = excuse_reason
+        if excuse_reason == "Other":
+            final_reason = st.text_input("Please specify the reason:", key="custom_reason_input")
+            
+        submit_excuse = st.button("💾 Save Official Excuse")
+        
+        if submit_excuse:
+            if start_date > end_date:
+                st.error("Error: 'From Date' cannot be after 'To Date'.")
+            elif excuse_reason == "Other" and not final_reason.strip():
+                st.error("Error: You must specify a reason when selecting 'Other'.")
+            else:
+                emp_str = str(excuse_emp)
+                start_str = str(start_date)
+                end_str = str(end_date)
+                
+                supabase.table("attendance_excuses").delete().eq("employee_name", emp_str).gte("excuse_date", start_str).lte("excuse_date", end_str).execute()
+                
+                date_list = pd.date_range(start=start_date, end=end_date)
+                records_to_insert = [{"employee_name": emp_str, "excuse_date": str(single_date.strftime('%Y-%m-%d')), "reason": final_reason} for single_date in date_list]
+                
+                for i in range(0, len(records_to_insert), 1000):
+                    supabase.table("attendance_excuses").insert(records_to_insert[i:i+1000]).execute()
+                
+                st.success(f"Excuse saved! {excuse_emp} is now marked as '{final_reason}' from {start_date} to {end_date}.")
+                st.cache_data.clear()
+                st.rerun()
                 
         # --- FAST INLINE DELETE TABLE ---
         if EXCUSES_DICT:
             st.markdown("##### Recent Logged Excuses")
             st.write("Check the box next to any excuse you want to remove, then click Confirm.")
             
-            # Format dictionary into a fast list for the data editor
             excuse_list = [{"Employee": k[0], "Date": k[1], "Reason": v, "❌ Delete": False} for k, v in EXCUSES_DICT.items()]
             excuse_df_display = pd.DataFrame(excuse_list).sort_values(by="Date", ascending=False)
             
-            # Render a high-speed native Streamlit interactive table
             edited_excuses = st.data_editor(
                 excuse_df_display,
                 use_container_width=True,
                 hide_index=True,
-                disabled=["Employee", "Date", "Reason"], # Locks the text columns so they can't be accidentally changed
+                disabled=["Employee", "Date", "Reason"], 
                 column_config={
                     "❌ Delete": st.column_config.CheckboxColumn("Select to Delete", default=False)
                 }
             )
             
-            # Filter the table for any rows the user checked
             rows_to_delete = edited_excuses[edited_excuses["❌ Delete"] == True]
             
             if not rows_to_delete.empty:
@@ -254,7 +257,7 @@ with tab3:
 
 with tab2:
     st.markdown("### 📅 Weekly Roster & Schedules")
-    st.write("Select an employee below to edit their specific daily shift times. Anyone without custom settings defaults to 8:00 AM - 5:00 PM.")
+    st.info("💡 **Handling Temporary Swaps:** If an employee is just swapping their Day Off for one week, **do not change their schedule here**, as it will retroactively alter their past data. Instead, go to the 'Leaves & Excuses' tab and log a **'Swapped Day Off'** for that specific date.")
     
     if not df.empty:
         unique_staff = df['Employee Name'].dropna().unique().tolist()
@@ -387,12 +390,12 @@ with tab1:
                         row_format = format_absent
                     elif 'Incomplete' in status:
                         row_format = format_incomplete
-                    elif status == 'Day Off':
+                    elif status in ['Day Off', 'Swapped Day Off']: # Both trigger Grey
                         row_format = format_dayoff
-                    elif status in EXCUSE_TYPES:
-                        row_format = format_excuse
-                    else:
+                    elif status == 'Complete':
                         row_format = format_complete
+                    else:
+                        row_format = format_excuse
                         
                     for col_num in range(len(export_df.columns)):
                         val = export_df.iloc[row_num, col_num]
@@ -415,12 +418,12 @@ with tab1:
                 return ['background-color: #FFEAEE; color: #D32F2F'] * len(row)
             elif 'Incomplete' in row['Status']:
                 return ['background-color: #FFF4E5; color: #ED6C02'] * len(row)
-            elif row['Status'] == 'Day Off':
+            elif row['Status'] in ['Day Off', 'Swapped Day Off']: # Both trigger Grey
                 return ['background-color: #F3F4F6; color: #6B7280'] * len(row)
-            elif row['Status'] in EXCUSE_TYPES:
-                return ['background-color: #E3F2FD; color: #1976D2'] * len(row)
-            else:
+            elif row['Status'] == 'Complete':
                 return [''] * len(row)
+            else:
+                return ['background-color: #E3F2FD; color: #1976D2'] * len(row)
 
         styled_tracker = display_df.style.apply(highlight_status, axis=1)
         st.dataframe(styled_tracker, use_container_width=True, hide_index=True)
