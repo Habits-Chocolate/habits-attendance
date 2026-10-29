@@ -152,7 +152,7 @@ EXCUSE_TYPES = ["Sick Leave", "Vacation", "Public Holiday", "Emergency", "Busine
 tab1, tab2, tab3 = st.tabs(["📊 Main Dashboard", "⚙️ Shift Settings", "📝 Leaves & Excuses"])
 
 with tab3:
-    st.markdown("### 📝 Log a Leave or Excuse")
+    st.markdown("### 📝 Log a Leave or Excuse (Date Range)")
     st.write("Log a valid excuse for an employee. Select the Start and End date (keep them the same for a single day).")
     
     if not df.empty:
@@ -161,13 +161,13 @@ with tab3:
         with st.form("excuse_form"):
             colA, colB, colC, colD = st.columns(4)
             with colA:
-                excuse_emp = st.selectbox("Select Employee", unique_staff)
+                excuse_emp = st.selectbox("Select Employee", unique_staff, key="add_emp")
             with colB:
-                start_date = st.date_input("From Date")
+                start_date = st.date_input("From Date", key="add_start")
             with colC:
-                end_date = st.date_input("To Date")
+                end_date = st.date_input("To Date", key="add_end")
             with colD:
-                excuse_reason = st.selectbox("Reason", EXCUSE_TYPES)
+                excuse_reason = st.selectbox("Reason", EXCUSE_TYPES, key="add_reason")
                 
             submit_excuse = st.form_submit_button("💾 Save Official Excuse")
             
@@ -175,55 +175,79 @@ with tab3:
                 if start_date > end_date:
                     st.error("Error: 'From Date' cannot be after 'To Date'.")
                 else:
+                    emp_str = str(excuse_emp)
+                    start_str = str(start_date)
+                    end_str = str(end_date)
+                    
+                    supabase.table("attendance_excuses").delete().eq("employee_name", emp_str).gte("excuse_date", start_str).lte("excuse_date", end_str).execute()
+                    
                     date_list = pd.date_range(start=start_date, end=end_date)
-                    for single_date in date_list:
-                        date_str = single_date.strftime('%Y-%m-%d')
-                        supabase.table("attendance_excuses").delete().eq("employee_name", excuse_emp).eq("excuse_date", date_str).execute()
-                        supabase.table("attendance_excuses").insert({
-                            "employee_name": excuse_emp,
-                            "excuse_date": date_str,
-                            "reason": excuse_reason
-                        }).execute()
+                    records_to_insert = [{"employee_name": emp_str, "excuse_date": str(single_date.strftime('%Y-%m-%d')), "reason": excuse_reason} for single_date in date_list]
+                    
+                    for i in range(0, len(records_to_insert), 1000):
+                        supabase.table("attendance_excuses").insert(records_to_insert[i:i+1000]).execute()
                     
                     st.success(f"Excuse saved! {excuse_emp} is now marked as '{excuse_reason}' from {start_date} to {end_date}.")
-                    load_data.clear()
+                    st.cache_data.clear()
                     st.rerun()
                 
-        # Show existing excuses
+        # --- INLINE DELETE LIST ---
         if EXCUSES_DICT:
             st.markdown("##### Recent Logged Excuses")
-            excuse_display = pd.DataFrame([
+            
+            # Sort excuses by date so the newest are at the top
+            sorted_excuses = sorted([
                 {"Employee": k[0], "Date": k[1], "Reason": v} for k, v in EXCUSES_DICT.items()
-            ]).sort_values(by="Date", ascending=False)
-            st.dataframe(excuse_display, use_container_width=True, hide_index=True)
+            ], key=lambda x: x["Date"], reverse=True)
+            
+            # Create a scrollable container for the inline list
+            with st.container(height=350):
+                # Header Row
+                col_h1, col_h2, col_h3, col_h4 = st.columns([3, 2, 3, 2])
+                col_h1.markdown("**Employee**")
+                col_h2.markdown("**Date**")
+                col_h3.markdown("**Reason**")
+                col_h4.markdown("**Action**")
+                
+                # Render each excuse with a delete button
+                for idx, ex in enumerate(sorted_excuses):
+                    c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
+                    c1.write(ex["Employee"])
+                    c2.write(ex["Date"])
+                    c3.write(ex["Reason"])
+                    if c4.button("❌ Remove", key=f"inline_del_{ex['Employee']}_{ex['Date']}_{idx}"):
+                        supabase.table("attendance_excuses").delete().eq("employee_name", ex["Employee"]).eq("excuse_date", ex["Date"]).execute()
+                        st.cache_data.clear()
+                        st.rerun()
             
             st.divider()
             
-            # --- DELETE EXCUSE SECTION ---
-            st.markdown("##### 🗑️ Remove an Excuse")
-            st.write("Made a mistake? Select the employee and the date range to instantly clear their excuses.")
+            # --- BULK DELETE SECTION ---
+            st.markdown("##### 🗑️ Bulk Remove Excuses")
+            st.write("Need to wipe a large date range? Select the employee and the dates below.")
             with st.form("delete_excuse_form"):
                 col_del_1, col_del_2, col_del_3 = st.columns(3)
                 with col_del_1:
-                    del_emp = st.selectbox("Select Employee to clear", unique_staff)
+                    del_emp = st.selectbox("Select Employee to clear", unique_staff, key="del_emp")
                 with col_del_2:
                     del_start = st.date_input("From Date", key="del_start")
                 with col_del_3:
                     del_end = st.date_input("To Date", key="del_end")
                     
-                submit_delete = st.form_submit_button("❌ Delete Excuse(s)")
+                submit_delete = st.form_submit_button("❌ Bulk Delete Excuse(s)")
                 
                 if submit_delete:
                     if del_start > del_end:
                         st.error("Error: 'From Date' cannot be after 'To Date'.")
                     else:
-                        date_list = pd.date_range(start=del_start, end=del_end)
-                        for single_date in date_list:
-                            date_str = single_date.strftime('%Y-%m-%d')
-                            supabase.table("attendance_excuses").delete().eq("employee_name", del_emp).eq("excuse_date", date_str).execute()
+                        emp_str = str(del_emp)
+                        start_str = str(del_start)
+                        end_str = str(del_end)
+                        
+                        supabase.table("attendance_excuses").delete().eq("employee_name", emp_str).gte("excuse_date", start_str).lte("excuse_date", end_str).execute()
                         
                         st.success(f"Successfully removed excuses for {del_emp} from {del_start} to {del_end}.")
-                        load_data.clear()
+                        st.cache_data.clear()
                         st.rerun()
 
 with tab2:
@@ -232,7 +256,7 @@ with tab2:
     
     if not df.empty:
         unique_staff = df['Employee Name'].dropna().unique().tolist()
-        selected_emp = st.selectbox("Select Staff Member to Edit", unique_staff)
+        selected_emp = st.selectbox("Select Staff Member to Edit", unique_staff, key="sched_emp")
         st.markdown(f"#### Editing Schedule for: **{selected_emp}**")
         
         emp_config = WEEKLY_CONFIGS.get(selected_emp, {})
@@ -275,7 +299,7 @@ with tab2:
             }).execute()
             
             st.success(f"Successfully saved custom weekly schedule for {selected_emp}!")
-            load_data.clear()
+            st.cache_data.clear()
             st.rerun()
 
 with tab1:
